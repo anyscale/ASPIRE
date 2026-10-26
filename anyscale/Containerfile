@@ -1,78 +1,27 @@
-# ASPIRE on Anyscale: the Ray base image plus what LIBERO-Pro runs need, with
-# the LIBERO and provider (sam3, pyroki, curobo) venvs built into the image so
-# every node starts ready.
-#
-# Build from the repo root:
-#   anyscale image build -f anyscale/Containerfile -n aspire --ray-version 2.59.0
-#
-# The Anyscale image builder takes no local COPY and no SHELL instruction, so
-# ASPIRE is cloned at a pinned commit and every RUN is plain sh that hands off
-# to the repo's bash bootstraps.
-
+# ASPIRE on Anyscale: the system packages and tools LIBERO-Pro runs need. The code is not
+# in the image; it comes from the workspace or the job's working_dir, and the repo's
+# bootstraps build their venvs from that checkout.
 FROM anyscale/ray:2.59.0-slim-py311-cu128
 
-USER root
+# build-essential and cmake compile egl-probe (robomimic) and pyliblzfse (pyroki) during
+# the bootstraps. libegl1, libgl1 and libgles2 are the GL dispatch libraries MuJoCo uses.
+RUN sudo apt-get update \
+ && sudo apt-get install -y --no-install-recommends \
+      build-essential cmake curl git libegl1 libgl1 libgles2 \
+ && sudo rm -rf /var/lib/apt/lists/*
 
-# Compilers, cmake and the Mesa GL/EGL headers build egl-probe (robomimic) and
-# pyliblzfse (pyroki) from source. libegl1 and libgles2 are the glvnd dispatch
-# libraries MuJoCo renders through.
-RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      build-essential ca-certificates cmake curl git jq pkg-config \
-      libegl1 libgl1 libgles2 libglvnd0 \
-      libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libglu1-mesa-dev \
- && rm -rf /var/lib/apt/lists/*
-
-# Point EGL at the NVIDIA driver. The container toolkit mounts libEGL_nvidia
-# only when the graphics capability is requested, and `cap-harness doctor`
-# looks for this vendor file.
-RUN mkdir -p /usr/share/glvnd/egl_vendor.d \
- && printf '%s\n' '{"file_format_version": "1.0.0", "ICD": {"library_path": "libEGL_nvidia.so.0"}}' \
-      > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
-
-USER ray
-
-# uv and Claude Code install into ~/.local/bin, which is already first on the
-# base PATH. The venvs use a uv-managed CPython 3.11, not Ray's Anaconda one.
-ARG UV_VERSION=0.13.5
-RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_NO_MODIFY_PATH=1 sh \
- && curl -fsSL https://claude.ai/install.sh | bash \
- && uv python install --no-bin 3.11 \
- && mkdir -p /home/ray/.local/share/aspire \
- && ln -sf "$(uv python find --managed-python 3.11)" /home/ray/.local/share/aspire/python3.11 \
- && uv --version && claude --version
-
-ARG ASPIRE_REPO=https://github.com/anyscale/ASPIRE.git
-ARG ASPIRE_COMMIT=fa00f0ef2bc1d91d594b9aa502c22133c9f538f7
-ENV ASPIRE_ROOT=/home/ray/ASPIRE \
-    CAP_HARNESS_PYTHON=/home/ray/.local/share/aspire/python3.11 \
-    CAP_HARNESS_PROFILE=rtx4090 \
-    LIBERO_CONFIG_PATH=/home/ray/ASPIRE/.libero \
+# Render on the GPU: the NVIDIA container toolkit mounts libEGL_nvidia only for the
+# graphics capability, and glvnd finds it through this vendor file.
+RUN sudo mkdir -p /usr/share/glvnd/egl_vendor.d \
+ && echo '{"file_format_version": "1.0.0", "ICD": {"library_path": "libEGL_nvidia.so.0"}}' \
+    | sudo tee /usr/share/glvnd/egl_vendor.d/10_nvidia.json > /dev/null
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
     MUJOCO_GL=egl \
     PYOPENGL_PLATFORM=egl
 
-# Only the submodules the LIBERO and provider bootstraps check out;
-# BEHAVIOR-1K stays out.
-RUN git init -q "$ASPIRE_ROOT" \
- && cd "$ASPIRE_ROOT" \
- && git remote add origin "$ASPIRE_REPO" \
- && git fetch -q --depth 1 origin "$ASPIRE_COMMIT" \
- && git checkout -q FETCH_HEAD \
- && git submodule update --init --depth 1 \
-      third_party/LIBERO-PRO third_party/robosuite third_party/sam3 \
-      third_party/contact_graspnet_pytorch third_party/curobo
+# The bootstraps create their venvs with the base image's uv. Point them all at the image's
+# Python 3.11; bootstrap_curobo.sh would otherwise ask for /usr/bin/python3.
+ENV CAP_HARNESS_PYTHON=/home/ray/anaconda3/bin/python3
 
-# One RUN and one uv cache, so torch and the CUDA wheels are hardlinked into
-# each venv rather than stored once per venv. The cache is dropped after.
-RUN cd "$ASPIRE_ROOT" \
- && scripts/bootstrap_libero.sh \
- && CAP_HARNESS_CUROBO_CACHE="$ASPIRE_ROOT/.uv-cache" \
-      scripts/bootstrap_providers.sh --providers sam3,pyroki,curobo --profile rtx4090 \
- && rm -rf "$ASPIRE_ROOT/.uv-cache"
-
-# Smoke test without a GPU: the LIBERO venv imports and its paths resolve.
-RUN cd "$ASPIRE_ROOT" \
- && .venv-libero/bin/cap-harness doctor --unit --runtime libero --skip-services --output /tmp/doctor.json \
- && .venv-libero/bin/python -c 'import json, sys; checks = json.load(open("/tmp/doctor.json"))["checks"]; failed = [c["name"] for c in checks if c["status"] == "fail" and c["name"] not in ("platform", "nvidia")]; sys.exit("doctor failed: " + ", ".join(failed) if failed else 0)' \
- && rm -f /tmp/doctor.json
+# Claude Code CLI for the coordinator agent.
+RUN curl -fsSL https://claude.ai/install.sh | bash
