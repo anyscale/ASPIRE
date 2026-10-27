@@ -5,6 +5,10 @@
 #   anyscale workspace_v2 create -f anyscale/workspace.yaml
 #   anyscale workspace_v2 start -n aspire && anyscale workspace_v2 wait -n aspire
 #
+# When this cloud has no GPU, start the same workspace on another cloud. Each was tested on
+# 26 Oct 2026: workspace-aws-use1.yaml (fastest), workspace-gcp-usw1.yaml, workspace-aws-use2.yaml
+# and workspace-gcp-usc1.yaml.
+#
 # Then, in the workspace terminal, from the working directory. The first start fetches the code;
 # `git clone .` fails there because Anyscale has already written a .anyscaleignore:
 #   git init -q && git remote add origin https://github.com/anyscale/ASPIRE.git
